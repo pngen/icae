@@ -3,10 +3,10 @@ package ledger
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"errors"
-	"sync"
+	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"icae/models"
@@ -21,14 +21,15 @@ var (
 	ErrEmptyLedger        = errors.New("ledger contains no events")
 	ErrHashMismatch       = errors.New("ledger hash does not match expected value")
 	ErrEventValidation    = errors.New("event validation failed")
+	ErrDuplicateEventID   = errors.New("duplicate event_id")
 )
 
 // CostLedger represents a tamper-evident, append-only ledger for cost events.
 type CostLedger struct {
-	mu       sync.RWMutex
-	events   []models.CostEvent
-	hashes   []string
-	hashErr  error // Tracks any error during hash computation
+	mu      sync.RWMutex
+	events  []models.CostEvent
+	hashes  []string
+	hashErr error // Tracks any error during hash computation
 }
 
 // NewCostLedger creates and returns a new CostLedger instance.
@@ -54,8 +55,13 @@ func (l *CostLedger) AddEvent(event models.CostEvent) error {
 		return fmt.Errorf("%w: event timestamp %v is before last event %v",
 			ErrChronologicalOrder, event.Timestamp, l.events[len(l.events)-1].Timestamp)
 	}
+	for _, existing := range l.events {
+		if existing.EventID == event.EventID {
+			return fmt.Errorf("%w: %s", ErrDuplicateEventID, event.EventID)
+		}
+	}
 
-	l.events = append(l.events, event)
+	l.events = append(l.events, cloneEvent(event))
 	if err := l.updateHashLocked(); err != nil {
 		// Rollback the event addition on hash failure
 		l.events = l.events[:len(l.events)-1]
@@ -70,18 +76,18 @@ func (l *CostLedger) updateHashLocked() error {
 	eventData := make([]map[string]interface{}, len(l.events))
 	for i, e := range l.events {
 		eventData[i] = map[string]interface{}{
-			"event_id":         e.EventID,
-			"timestamp":        e.Timestamp.Format(time.RFC3339Nano),
-			"execution_id":     e.ExecutionID,
-			"component":        e.Component,
-			"action":           e.Action,
-			"unit_cost":        fmt.Sprintf("%.9f", e.UnitCost),
-			"quantity":         fmt.Sprintf("%.9f", e.Quantity),
-			"total_cost":       fmt.Sprintf("%.9f", e.TotalCost),
-			"currency":         e.Currency,
-			"cost_source":      e.CostSource,
-			"pricing_version":  e.PricingVersion,
-			"base_unit":        e.BaseUnit,
+			"event_id":        e.EventID,
+			"timestamp":       e.Timestamp.Format(time.RFC3339Nano),
+			"execution_id":    e.ExecutionID,
+			"component":       e.Component,
+			"action":          e.Action,
+			"unit_cost":       fmt.Sprintf("%.9f", e.UnitCost),
+			"quantity":        fmt.Sprintf("%.9f", e.Quantity),
+			"total_cost":      fmt.Sprintf("%.9f", e.TotalCost),
+			"currency":        e.Currency,
+			"cost_source":     e.CostSource,
+			"pricing_version": e.PricingVersion,
+			"base_unit":       e.BaseUnit,
 		}
 		// Only include metadata if non-nil to ensure determinism
 		if e.Metadata != nil {
@@ -117,7 +123,9 @@ func (l *CostLedger) GetEvents() []models.CostEvent {
 	defer l.mu.RUnlock()
 
 	result := make([]models.CostEvent, len(l.events))
-	copy(result, l.events)
+	for i, event := range l.events {
+		result[i] = cloneEvent(event)
+	}
 	return result
 }
 
@@ -129,7 +137,7 @@ func (l *CostLedger) GetEventsByExecution(executionID string) []models.CostEvent
 	var filtered []models.CostEvent
 	for _, event := range l.events {
 		if event.ExecutionID == executionID {
-			filtered = append(filtered, event)
+			filtered = append(filtered, cloneEvent(event))
 		}
 	}
 	return filtered
@@ -143,7 +151,7 @@ func (l *CostLedger) GetEventsByComponent(component string) []models.CostEvent {
 	var filtered []models.CostEvent
 	for _, event := range l.events {
 		if event.Component == component {
-			filtered = append(filtered, event)
+			filtered = append(filtered, cloneEvent(event))
 		}
 	}
 	return filtered
@@ -223,7 +231,9 @@ func (l *CostLedger) Snapshot() LedgerSnapshot {
 	defer l.mu.RUnlock()
 
 	events := make([]models.CostEvent, len(l.events))
-	copy(events, l.events)
+	for i, event := range l.events {
+		events[i] = cloneEvent(event)
+	}
 
 	hashes := make([]string, len(l.hashes))
 	copy(hashes, l.hashes)
@@ -254,4 +264,20 @@ type LedgerSnapshot struct {
 	SnapshotAt  time.Time          `json:"snapshot_at"`
 	EventCount  int                `json:"event_count"`
 	CurrentHash string             `json:"current_hash"`
+}
+
+func cloneEvent(event models.CostEvent) models.CostEvent {
+	event.Metadata = cloneMetadata(event.Metadata)
+	return event
+}
+
+func cloneMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if metadata == nil {
+		return nil
+	}
+	clone := make(map[string]interface{}, len(metadata))
+	for key, value := range metadata {
+		clone[key] = value
+	}
+	return clone
 }

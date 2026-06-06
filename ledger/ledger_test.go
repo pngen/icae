@@ -87,6 +87,26 @@ func TestAddEvent_ChronologicalOrder(t *testing.T) {
 	}
 }
 
+func TestAddEvent_DuplicateEventID(t *testing.T) {
+	l := NewCostLedger()
+	now := time.Now().UTC()
+
+	e1 := createValidEvent("evt-001", now)
+	e2 := createValidEvent("evt-001", now.Add(time.Second))
+
+	if err := l.AddEvent(e1); err != nil {
+		t.Fatalf("first AddEvent failed: %v", err)
+	}
+
+	err := l.AddEvent(e2)
+	if err == nil {
+		t.Fatal("expected duplicate event_id error, got nil")
+	}
+	if !errors.Is(err, ErrDuplicateEventID) {
+		t.Errorf("expected ErrDuplicateEventID, got %v", err)
+	}
+}
+
 func TestGetEvents_ReturnsCopy(t *testing.T) {
 	l := NewCostLedger()
 	event := createValidEvent("evt-001", time.Now().UTC())
@@ -99,6 +119,29 @@ func TestGetEvents_ReturnsCopy(t *testing.T) {
 	original := l.GetEvents()
 	if original[0].TotalCost == 999.99 {
 		t.Error("GetEvents did not return a copy - original was modified")
+	}
+}
+
+func TestEventMetadataCannotMutateLedger(t *testing.T) {
+	l := NewCostLedger()
+	event := createValidEvent("evt-001", time.Now().UTC())
+	event.Metadata = map[string]interface{}{"source": "initial"}
+
+	if err := l.AddEvent(event); err != nil {
+		t.Fatalf("AddEvent failed: %v", err)
+	}
+	originalHash := l.GetLedgerHash()
+
+	event.Metadata["source"] = "mutated after add"
+	events := l.GetEvents()
+	events[0].Metadata["source"] = "mutated from copy"
+
+	stored := l.GetEvents()
+	if stored[0].Metadata["source"] != "initial" {
+		t.Fatalf("ledger metadata was externally mutated: %v", stored[0].Metadata["source"])
+	}
+	if l.GetLedgerHash() != originalHash {
+		t.Fatal("ledger hash changed after external metadata mutation")
 	}
 }
 

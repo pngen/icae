@@ -59,20 +59,26 @@ func (e *CostEvent) Validate() error {
 	}
 
 	// Numeric validation
-	if e.UnitCost < 0 {
+	if !isFinite(e.UnitCost) {
+		errs = append(errs, "unit_cost must be finite")
+	} else if e.UnitCost < 0 {
 		errs = append(errs, "unit_cost cannot be negative")
 	}
-	if e.Quantity < 0 {
+	if !isFinite(e.Quantity) {
+		errs = append(errs, "quantity must be finite")
+	} else if e.Quantity < 0 {
 		errs = append(errs, "quantity cannot be negative")
 	}
-	if e.TotalCost < 0 {
+	if !isFinite(e.TotalCost) {
+		errs = append(errs, "total_cost must be finite")
+	} else if e.TotalCost < 0 {
 		errs = append(errs, "total_cost cannot be negative")
 	}
 
 	// Cost consistency validation with epsilon for floating-point comparison
 	const epsilon = 1e-9
 	expectedCost := e.UnitCost * e.Quantity
-	if math.Abs(e.TotalCost-expectedCost) > epsilon {
+	if isFinite(e.UnitCost) && isFinite(e.Quantity) && isFinite(e.TotalCost) && math.Abs(e.TotalCost-expectedCost) > epsilon {
 		errs = append(errs, fmt.Sprintf(
 			"total_cost (%.9f) must equal unit_cost * quantity (%.9f * %.9f = %.9f)",
 			e.TotalCost, e.UnitCost, e.Quantity, expectedCost))
@@ -109,3 +115,7 @@ func (e *ValidationError) Is(target error) bool {
 
 // ErrValidation is a sentinel error for validation failures.
 var ErrValidation = errors.New("validation error")
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}

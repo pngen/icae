@@ -73,6 +73,50 @@ func TestPricingModel_Validate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "invalid tier - gap",
+			model: PricingModel{
+				ID:          "pm-005",
+				Version:     "v1.0.0",
+				Component:   "gpt-4",
+				PricingType: "token",
+				BaseUnit:    "token",
+				Tiers: []PricingTier{
+					{MinQuantity: 0, MaxQuantity: 1000, UnitCost: 0.03},
+					{MinQuantity: 1500, MaxQuantity: -1, UnitCost: 0.02},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid tier - overlap",
+			model: PricingModel{
+				ID:          "pm-006",
+				Version:     "v1.0.0",
+				Component:   "gpt-4",
+				PricingType: "token",
+				BaseUnit:    "token",
+				Tiers: []PricingTier{
+					{MinQuantity: 0, MaxQuantity: 1000, UnitCost: 0.03},
+					{MinQuantity: 500, MaxQuantity: -1, UnitCost: 0.02},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid tier - non-finite unit cost",
+			model: PricingModel{
+				ID:          "pm-007",
+				Version:     "v1.0.0",
+				Component:   "gpt-4",
+				PricingType: "token",
+				BaseUnit:    "token",
+				Tiers: []PricingTier{
+					{MinQuantity: 0, MaxQuantity: -1, UnitCost: math.Inf(1)},
+				},
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -140,6 +184,13 @@ func TestPricingModel_CalculateCost(t *testing.T) {
 			name:     "negative quantity",
 			model:    tieredModel,
 			quantity: -100,
+			want:     0,
+			wantErr:  true,
+		},
+		{
+			name:     "non-finite quantity",
+			model:    tieredModel,
+			quantity: math.Inf(1),
 			want:     0,
 			wantErr:  true,
 		},

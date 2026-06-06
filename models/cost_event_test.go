@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -88,6 +89,27 @@ func TestCostEvent_Validate_NegativeValues(t *testing.T) {
 			err := event.Validate()
 			if err == nil {
 				t.Fatalf("expected error for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestCostEvent_Validate_NonFiniteValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CostEvent)
+	}{
+		{"nan unit_cost", func(e *CostEvent) { e.UnitCost = math.NaN() }},
+		{"infinite quantity", func(e *CostEvent) { e.Quantity = math.Inf(1) }},
+		{"infinite total_cost", func(e *CostEvent) { e.TotalCost = math.Inf(1) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := createValidCostEvent()
+			tt.mutate(&event)
+			if err := event.Validate(); err == nil {
+				t.Fatal("expected non-finite value to be rejected")
 			}
 		})
 	}
