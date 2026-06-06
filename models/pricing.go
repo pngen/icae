@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 )
 
 // PricingTier represents a pricing tier for a model or service.
@@ -18,14 +19,14 @@ const pricingEpsilon = 1e-9
 
 // PricingModel defines how costs are calculated.
 type PricingModel struct {
-	ID             string                 `json:"id"`
-	Version        string                 `json:"version"`
-	Component      string                 `json:"component"`
-	PricingType    string                 `json:"pricing_type"`
-	BaseUnit       string                 `json:"base_unit"`
-	Tiers          []PricingTier          `json:"tiers"`
-	FixedFee       float64                `json:"fixed_fee,omitempty"`
-	Metadata       map[string]string      `json:"metadata,omitempty"`
+	ID          string            `json:"id"`
+	Version     string            `json:"version"`
+	Component   string            `json:"component"`
+	PricingType string            `json:"pricing_type"`
+	BaseUnit    string            `json:"base_unit"`
+	Tiers       []PricingTier     `json:"tiers"`
+	FixedFee    float64           `json:"fixed_fee,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // Validate checks that the PricingModel is correctly configured.
@@ -45,6 +46,9 @@ func (p *PricingModel) Validate() error {
 	if p.BaseUnit == "" {
 		return errors.New("pricing model base_unit is required")
 	}
+	if !isFinite(p.FixedFee) {
+		return errors.New("fixed_fee must be finite")
+	}
 	if p.FixedFee < 0 {
 		return errors.New("fixed_fee cannot be negative")
 	}
@@ -61,7 +65,23 @@ func (p *PricingModel) Validate() error {
 
 // validateTiers ensures tier configuration is valid and contiguous.
 func (p *PricingModel) validateTiers() error {
-	for i, tier := range p.Tiers {
+	sortedTiers := make([]PricingTier, len(p.Tiers))
+	copy(sortedTiers, p.Tiers)
+	sort.Slice(sortedTiers, func(i, j int) bool {
+		return sortedTiers[i].MinQuantity < sortedTiers[j].MinQuantity
+	})
+
+	expectedMin := 0.0
+	for i, tier := range sortedTiers {
+		if !isFinite(tier.MinQuantity) {
+			return fmt.Errorf("tier %d: min_quantity must be finite", i)
+		}
+		if tier.MaxQuantity != -1 && !isFinite(tier.MaxQuantity) {
+			return fmt.Errorf("tier %d: max_quantity must be finite or -1 for unbounded", i)
+		}
+		if !isFinite(tier.UnitCost) {
+			return fmt.Errorf("tier %d: unit_cost must be finite", i)
+		}
 		if tier.MinQuantity < 0 {
 			return fmt.Errorf("tier %d: min_quantity cannot be negative", i)
 		}
@@ -71,6 +91,16 @@ func (p *PricingModel) validateTiers() error {
 		if tier.UnitCost < 0 {
 			return fmt.Errorf("tier %d: unit_cost cannot be negative", i)
 		}
+		if math.Abs(tier.MinQuantity-expectedMin) > pricingEpsilon {
+			return fmt.Errorf("tier %d: min_quantity %.9f must equal expected contiguous start %.9f", i, tier.MinQuantity, expectedMin)
+		}
+		if tier.MaxQuantity == -1 {
+			if i != len(sortedTiers)-1 {
+				return fmt.Errorf("tier %d: unbounded tier must be the final tier", i)
+			}
+			continue
+		}
+		expectedMin = tier.MaxQuantity
 	}
 	return nil
 }
@@ -81,6 +111,9 @@ func (p *PricingModel) validateTiers() error {
 func (p *PricingModel) CalculateCost(quantity float64) (float64, error) {
 	if quantity < 0 {
 		return 0, fmt.Errorf("quantity cannot be negative: got %.9f", quantity)
+	}
+	if !isFinite(quantity) {
+		return 0, fmt.Errorf("quantity must be finite: got %.9f", quantity)
 	}
 
 	// Handle zero quantity - return only fixed fee
