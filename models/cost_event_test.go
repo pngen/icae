@@ -73,6 +73,10 @@ func TestCostEvent_Validate_NegativeValues(t *testing.T) {
 			e.UnitCost = -0.01
 			e.TotalCost = e.UnitCost * e.Quantity
 		}},
+		{"negative fixed_fee", func(e *CostEvent) {
+			e.FixedFee = -0.50
+			e.TotalCost = e.FixedFee + e.UnitCost*e.Quantity
+		}},
 		{"negative quantity", func(e *CostEvent) {
 			e.Quantity = -10
 			e.TotalCost = e.UnitCost * e.Quantity
@@ -100,6 +104,7 @@ func TestCostEvent_Validate_NonFiniteValues(t *testing.T) {
 		mutate func(*CostEvent)
 	}{
 		{"nan unit_cost", func(e *CostEvent) { e.UnitCost = math.NaN() }},
+		{"nan fixed_fee", func(e *CostEvent) { e.FixedFee = math.NaN() }},
 		{"infinite quantity", func(e *CostEvent) { e.Quantity = math.Inf(1) }},
 		{"infinite total_cost", func(e *CostEvent) { e.TotalCost = math.Inf(1) }},
 	}
@@ -137,6 +142,17 @@ func TestCostEvent_Validate_ZeroQuantity(t *testing.T) {
 
 	if err := event.Validate(); err != nil {
 		t.Errorf("zero quantity should be valid: %v", err)
+	}
+}
+
+func TestCostEvent_Validate_FixedFeeWithZeroQuantity(t *testing.T) {
+	event := createValidCostEvent()
+	event.FixedFee = 0.50
+	event.Quantity = 0
+	event.TotalCost = 0.50
+
+	if err := event.Validate(); err != nil {
+		t.Errorf("nonzero fixed fee with zero quantity should be valid: %v", err)
 	}
 }
 

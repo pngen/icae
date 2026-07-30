@@ -17,6 +17,7 @@ const replayEpsilon = 1e-6
 var (
 	ErrUnknownPricingVersion = errors.New("unknown pricing version")
 	ErrCostMismatch          = errors.New("replayed cost does not match recorded cost")
+	ErrBaseUnitMismatch      = errors.New("pricing model base unit does not match event base unit")
 	ErrNoEventsFound         = errors.New("no events found for execution")
 	ErrNilLedger             = errors.New("ledger cannot be nil")
 )
@@ -27,13 +28,10 @@ type ReplayEngine struct {
 	PricingModels map[string]models.PricingModel
 }
 
-// Returns an error if pricingModels is nil.
+// A nil pricingModels map is treated as an empty map.
 func NewReplayEngine(pricingModels map[string]models.PricingModel) *ReplayEngine {
-	if pricingModels == nil {
-		pricingModels = make(map[string]models.PricingModel)
-	}
 	return &ReplayEngine{
-		PricingModels: pricingModels,
+		PricingModels: clonePricingModels(pricingModels),
 	}
 }
 
@@ -46,7 +44,7 @@ func (r *ReplayEngine) AddPricingModel(model models.PricingModel) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.PricingModels[model.Key()] = model
+	r.PricingModels[model.Key()] = clonePricingModel(model)
 	return nil
 }
 
@@ -56,12 +54,22 @@ func (r *ReplayEngine) GetPricingModel(key string) (models.PricingModel, bool) {
 	defer r.mu.RUnlock()
 
 	model, exists := r.PricingModels[key]
-	return model, exists
+	if !exists {
+		return models.PricingModel{}, false
+	}
+	return clonePricingModel(model), true
 }
 
 // ReplayExecution recomputes the total cost for an execution using current pricing models.
 // Returns the total replayed cost and any error encountered.
 func (r *ReplayEngine) ReplayExecution(executionID string, l *ledger.CostLedger) (float64, error) {
+	return r.replayExecution(executionID, l, true)
+}
+
+// replayExecution recomputes an execution and optionally verifies every recalculated
+// event cost against its recorded value. Comparison callers disable verification so
+// ordinary pricing drift can be returned as a structured mismatch and delta.
+func (r *ReplayEngine) replayExecution(executionID string, l *ledger.CostLedger, verifyRecordedCost bool) (float64, error) {
 	if l == nil {
 		return 0, ErrNilLedger
 	}
@@ -82,6 +90,10 @@ func (r *ReplayEngine) ReplayExecution(executionID string, l *ledger.CostLedger)
 		if !exists {
 			return 0, fmt.Errorf("%w: %s", ErrUnknownPricingVersion, event.PricingVersion)
 		}
+		if pricingModel.BaseUnit != event.BaseUnit {
+			return 0, fmt.Errorf("%w: event %s uses %q, pricing model %s uses %q",
+				ErrBaseUnitMismatch, event.EventID, event.BaseUnit, event.PricingVersion, pricingModel.BaseUnit)
+		}
 
 		// Recalculate cost using current pricing
 		calculatedCost, err := pricingModel.CalculateCost(event.Quantity)
@@ -90,7 +102,7 @@ func (r *ReplayEngine) ReplayExecution(executionID string, l *ledger.CostLedger)
 		}
 
 		// Verify that the event's cost matches our calculation
-		if math.Abs(calculatedCost-event.TotalCost) > replayEpsilon {
+		if verifyRecordedCost && math.Abs(calculatedCost-event.TotalCost) > replayEpsilon {
 			return 0, fmt.Errorf("%w: event %s expected %.9f, calculated %.9f",
 				ErrCostMismatch, event.EventID, event.TotalCost, calculatedCost)
 		}
@@ -147,7 +159,7 @@ func (r *ReplayEngine) CompareReplayWithOriginal(executionID string, originalLed
 	result.OriginalCost = originalCost
 
 	// Try to replay using current pricing
-	replayedCost, err := r.ReplayExecution(executionID, originalLedger)
+	replayedCost, err := r.replayExecution(executionID, originalLedger, false)
 	if err != nil {
 		result.Status = "error"
 		result.Error = err.Error()
@@ -194,4 +206,27 @@ func (r *ReplayEngine) ReplayAll(l *ledger.CostLedger) ([]ReplayResult, error) {
 	}
 
 	return results, nil
+}
+
+func clonePricingModels(pricingModels map[string]models.PricingModel) map[string]models.PricingModel {
+	cloned := make(map[string]models.PricingModel, len(pricingModels))
+	for key, model := range pricingModels {
+		cloned[key] = clonePricingModel(model)
+	}
+	return cloned
+}
+
+func clonePricingModel(model models.PricingModel) models.PricingModel {
+	cloned := model
+	if model.Tiers != nil {
+		cloned.Tiers = make([]models.PricingTier, len(model.Tiers))
+		copy(cloned.Tiers, model.Tiers)
+	}
+	if model.Metadata != nil {
+		cloned.Metadata = make(map[string]string, len(model.Metadata))
+		for key, value := range model.Metadata {
+			cloned.Metadata[key] = value
+		}
+	}
+	return cloned
 }

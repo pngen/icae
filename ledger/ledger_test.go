@@ -145,6 +145,152 @@ func TestEventMetadataCannotMutateLedger(t *testing.T) {
 	}
 }
 
+func TestNestedEventMetadataCannotMutateLedger(t *testing.T) {
+	type details struct {
+		Labels []string `json:"labels"`
+	}
+
+	l := NewCostLedger()
+	event := createValidEvent("evt-001", time.Now().UTC())
+	nestedMap := map[string]interface{}{
+		"values": []interface{}{map[string]interface{}{"value": "initial"}},
+	}
+	typedDetails := &details{Labels: []string{"initial"}}
+	event.Metadata = map[string]interface{}{
+		"nested":  nestedMap,
+		"details": typedDetails,
+	}
+
+	if err := l.AddEvent(event); err != nil {
+		t.Fatalf("AddEvent failed: %v", err)
+	}
+	originalHash := l.GetLedgerHash()
+
+	nestedMap["values"].([]interface{})[0].(map[string]interface{})["value"] = "mutated after add"
+	typedDetails.Labels[0] = "mutated after add"
+
+	readCopy := l.GetEvents()
+	readNested := readCopy[0].Metadata["nested"].(map[string]interface{})
+	readNested["values"].([]interface{})[0].(map[string]interface{})["value"] = "mutated from copy"
+	readDetails, ok := readCopy[0].Metadata["details"].(*details)
+	if !ok {
+		t.Fatalf("metadata type was not preserved: %T", readCopy[0].Metadata["details"])
+	}
+	readDetails.Labels[0] = "mutated from copy"
+
+	stored := l.GetEvents()[0].Metadata
+	storedNested := stored["nested"].(map[string]interface{})
+	if got := storedNested["values"].([]interface{})[0].(map[string]interface{})["value"]; got != "initial" {
+		t.Fatalf("nested ledger metadata was externally mutated: %v", got)
+	}
+	storedDetails := stored["details"].(*details)
+	if got := storedDetails.Labels[0]; got != "initial" {
+		t.Fatalf("typed ledger metadata was externally mutated: %v", got)
+	}
+	if l.GetLedgerHash() != originalHash {
+		t.Fatal("ledger hash changed after external nested metadata mutation")
+	}
+}
+
+func TestLedgerHashPreservesExactFloatValues(t *testing.T) {
+	now := time.Now().UTC()
+
+	zeroLedger := NewCostLedger()
+	zeroEvent := createValidEvent("evt-001", now)
+	zeroEvent.UnitCost = 0
+	zeroEvent.Quantity = 1
+	zeroEvent.TotalCost = 0
+	if err := zeroLedger.AddEvent(zeroEvent); err != nil {
+		t.Fatalf("failed to add zero-cost event: %v", err)
+	}
+
+	preciseLedger := NewCostLedger()
+	preciseEvent := createValidEvent("evt-001", now)
+	preciseEvent.UnitCost = 4e-10
+	preciseEvent.Quantity = 1
+	preciseEvent.TotalCost = 4e-10
+	if err := preciseLedger.AddEvent(preciseEvent); err != nil {
+		t.Fatalf("failed to add precise-cost event: %v", err)
+	}
+
+	if zeroLedger.GetLedgerHash() == preciseLedger.GetLedgerHash() {
+		t.Fatal("distinct accepted float64 costs produced the same ledger hash")
+	}
+}
+
+func TestLedgerHashCanonicalizesTimestampToUTC(t *testing.T) {
+	instant := time.Date(2026, time.January, 2, 3, 4, 5, 6, time.UTC)
+	offset := time.FixedZone("test-offset", 5*60*60)
+
+	utcLedger := NewCostLedger()
+	if err := utcLedger.AddEvent(createValidEvent("evt-001", instant)); err != nil {
+		t.Fatalf("failed to add UTC event: %v", err)
+	}
+
+	offsetLedger := NewCostLedger()
+	if err := offsetLedger.AddEvent(createValidEvent("evt-001", instant.In(offset))); err != nil {
+		t.Fatalf("failed to add offset event: %v", err)
+	}
+
+	if utcLedger.GetLedgerHash() != offsetLedger.GetLedgerHash() {
+		t.Fatal("the same instant in different locations produced different ledger hashes")
+	}
+	if got := offsetLedger.GetEvents()[0].Timestamp.Location(); got != time.UTC {
+		t.Fatalf("stored timestamp was not canonicalized to UTC: %v", got)
+	}
+}
+
+func TestAddEvent_RejectsMixedCurrency(t *testing.T) {
+	l := NewCostLedger()
+	now := time.Now().UTC()
+
+	if err := l.AddEvent(createValidEvent("evt-001", now)); err != nil {
+		t.Fatalf("first AddEvent failed: %v", err)
+	}
+	originalHash := l.GetLedgerHash()
+
+	event := createValidEvent("evt-002", now.Add(time.Second))
+	event.Currency = "EUR"
+	err := l.AddEvent(event)
+	if !errors.Is(err, ErrCurrencyMismatch) {
+		t.Fatalf("expected ErrCurrencyMismatch, got %v", err)
+	}
+	if l.GetEventCount() != 1 {
+		t.Fatalf("mixed-currency event mutated ledger count: %d", l.GetEventCount())
+	}
+	if l.GetLedgerHash() != originalHash {
+		t.Fatal("mixed-currency event mutated ledger hash")
+	}
+}
+
+func TestAddEvent_EqualTimestampsRequireEventIDOrder(t *testing.T) {
+	l := NewCostLedger()
+	now := time.Now().UTC()
+
+	if err := l.AddEvent(createValidEvent("evt-002", now)); err != nil {
+		t.Fatalf("first AddEvent failed: %v", err)
+	}
+	err := l.AddEvent(createValidEvent("evt-001", now))
+	if !errors.Is(err, ErrChronologicalOrder) {
+		t.Fatalf("expected ErrChronologicalOrder for reverse tie order, got %v", err)
+	}
+	if l.GetEventCount() != 1 {
+		t.Fatalf("reverse tie-order event mutated ledger count: %d", l.GetEventCount())
+	}
+
+	ordered := NewCostLedger()
+	if err := ordered.AddEvent(createValidEvent("evt-001", now)); err != nil {
+		t.Fatalf("failed to add first ordered event: %v", err)
+	}
+	if err := ordered.AddEvent(createValidEvent("evt-002", now)); err != nil {
+		t.Fatalf("failed to add second ordered event: %v", err)
+	}
+	events := ordered.GetEvents()
+	if events[0].EventID != "evt-001" || events[1].EventID != "evt-002" {
+		t.Fatalf("equal-time events are not in canonical order: %q, %q", events[0].EventID, events[1].EventID)
+	}
+}
+
 func TestGetLedgerHash_Empty(t *testing.T) {
 	l := NewCostLedger()
 	hash := l.GetLedgerHash()
