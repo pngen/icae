@@ -210,6 +210,25 @@ func TestPricingModel_CalculateCost(t *testing.T) {
 	}
 }
 
+func TestPricingModel_CalculateCost_RejectsInvalidModel(t *testing.T) {
+	model := PricingModel{
+		ID:          "pm-invalid",
+		Version:     "v1.0.0",
+		Component:   "api",
+		PricingType: "request",
+		BaseUnit:    "request",
+		FixedFee:    math.NaN(),
+	}
+
+	cost, err := model.CalculateCost(0)
+	if err == nil {
+		t.Fatal("expected invalid pricing model to be rejected")
+	}
+	if cost != 0 {
+		t.Fatalf("expected zero cost on validation failure, got %v", cost)
+	}
+}
+
 func TestPricingModel_Key(t *testing.T) {
 	model := PricingModel{
 		Component: "gpt-4",

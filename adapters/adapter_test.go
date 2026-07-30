@@ -86,6 +86,43 @@ func TestExecutionTranscriptAdapter_ToCostEvents_DefaultCurrency(t *testing.T) {
 	}
 }
 
+func TestExecutionTranscriptAdapter_ToCostEvents_FixedFee(t *testing.T) {
+	adapter := NewExecutionTranscriptAdapter()
+	now := time.Now().UTC()
+	transcript := &ExecutionTranscript{
+		ExecutionID: "exec-001",
+		Steps: []ExecutionStep{
+			{
+				StepID:         "step-001",
+				Timestamp:      now,
+				Component:      "model",
+				Action:         "invoke",
+				UnitCost:       0.03,
+				FixedFee:       0.50,
+				Quantity:       0,
+				Currency:       "USD",
+				CostSource:     "openai",
+				PricingVersion: "gpt-4:v1.0.0",
+				BaseUnit:       "token",
+			},
+		},
+	}
+
+	events, err := adapter.ToCostEvents(transcript)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].FixedFee != 0.50 {
+		t.Errorf("expected fixed_fee 0.50, got %f", events[0].FixedFee)
+	}
+	if events[0].TotalCost != 0.50 {
+		t.Errorf("expected total_cost 0.50, got %f", events[0].TotalCost)
+	}
+}
+
 func TestExecutionTranscriptAdapter_ToCostEvents_WrongType(t *testing.T) {
 	adapter := NewExecutionTranscriptAdapter()
 
@@ -130,6 +167,41 @@ func TestToolInvocationAdapter_Name(t *testing.T) {
 	adapter := NewToolInvocationAdapter()
 	if adapter.Name() != "tool_invocation" {
 		t.Errorf("expected 'tool_invocation', got '%s'", adapter.Name())
+	}
+}
+
+func TestToolInvocationAdapter_ToCostEvents_FixedFee(t *testing.T) {
+	adapter := NewToolInvocationAdapter()
+	now := time.Now().UTC()
+	log := &ToolInvocationLog{
+		ExecutionID: "exec-001",
+		Invocations: []ToolInvocation{
+			{
+				InvocationID:   "invocation-001",
+				Timestamp:      now,
+				ToolName:       "search",
+				UnitCost:       0.10,
+				FixedFee:       0.25,
+				Quantity:       2,
+				CostSource:     "tool-provider",
+				PricingVersion: "search:v1.0.0",
+				BaseUnit:       "request",
+			},
+		},
+	}
+
+	events, err := adapter.ToCostEvents(log)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].FixedFee != 0.25 {
+		t.Errorf("expected fixed_fee 0.25, got %f", events[0].FixedFee)
+	}
+	if events[0].TotalCost != 0.45 {
+		t.Errorf("expected total_cost 0.45, got %f", events[0].TotalCost)
 	}
 }
 

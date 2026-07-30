@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"reflect"
 	"sync"
 	"time"
 
@@ -22,6 +22,7 @@ var (
 	ErrHashMismatch       = errors.New("ledger hash does not match expected value")
 	ErrEventValidation    = errors.New("event validation failed")
 	ErrDuplicateEventID   = errors.New("duplicate event_id")
+	ErrCurrencyMismatch   = errors.New("event currency does not match ledger currency")
 )
 
 // CostLedger represents a tamper-evident, append-only ledger for cost events.
@@ -42,26 +43,42 @@ func NewCostLedger() *CostLedger {
 
 // Returns an error if the event fails validation or violates chronological ordering.
 func (l *CostLedger) AddEvent(event models.CostEvent) error {
+	// Strip location and monotonic-clock state so timestamps have one canonical
+	// representation in both the observable ledger and its hash.
+	event.Timestamp = event.Timestamp.UTC()
+
 	// Validate the event before acquiring lock
 	if err := event.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrEventValidation, err)
 	}
+	storedEvent := cloneEvent(event)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Ensure events are added in chronological order
-	if len(l.events) > 0 && event.Timestamp.Before(l.events[len(l.events)-1].Timestamp) {
-		return fmt.Errorf("%w: event timestamp %v is before last event %v",
-			ErrChronologicalOrder, event.Timestamp, l.events[len(l.events)-1].Timestamp)
-	}
 	for _, existing := range l.events {
 		if existing.EventID == event.EventID {
 			return fmt.Errorf("%w: %s", ErrDuplicateEventID, event.EventID)
 		}
 	}
 
-	l.events = append(l.events, cloneEvent(event))
+	if len(l.events) > 0 {
+		lastEvent := l.events[len(l.events)-1]
+		if event.Timestamp.Before(lastEvent.Timestamp) {
+			return fmt.Errorf("%w: event timestamp %v is before last event %v",
+				ErrChronologicalOrder, event.Timestamp, lastEvent.Timestamp)
+		}
+		if event.Timestamp.Equal(lastEvent.Timestamp) && event.EventID < lastEvent.EventID {
+			return fmt.Errorf("%w: event_id %q must sort after %q when timestamps are equal",
+				ErrChronologicalOrder, event.EventID, lastEvent.EventID)
+		}
+		if event.Currency != l.events[0].Currency {
+			return fmt.Errorf("%w: got %q, ledger uses %q",
+				ErrCurrencyMismatch, event.Currency, l.events[0].Currency)
+		}
+	}
+
+	l.events = append(l.events, storedEvent)
 	if err := l.updateHashLocked(); err != nil {
 		// Rollback the event addition on hash failure
 		l.events = l.events[:len(l.events)-1]
@@ -72,40 +89,10 @@ func (l *CostLedger) AddEvent(event models.CostEvent) error {
 
 // updateHashLocked updates the ledger's hash. Caller must hold l.mu.
 func (l *CostLedger) updateHashLocked() error {
-	// Create a deterministic representation of all events
-	eventData := make([]map[string]interface{}, len(l.events))
-	for i, e := range l.events {
-		eventData[i] = map[string]interface{}{
-			"event_id":        e.EventID,
-			"timestamp":       e.Timestamp.Format(time.RFC3339Nano),
-			"execution_id":    e.ExecutionID,
-			"component":       e.Component,
-			"action":          e.Action,
-			"unit_cost":       fmt.Sprintf("%.9f", e.UnitCost),
-			"quantity":        fmt.Sprintf("%.9f", e.Quantity),
-			"total_cost":      fmt.Sprintf("%.9f", e.TotalCost),
-			"currency":        e.Currency,
-			"cost_source":     e.CostSource,
-			"pricing_version": e.PricingVersion,
-			"base_unit":       e.BaseUnit,
-		}
-		// Only include metadata if non-nil to ensure determinism
-		if e.Metadata != nil {
-			eventData[i]["metadata"] = e.Metadata
-		}
-	}
-
-	// Sort by event_id for deterministic ordering (timestamp may have duplicates)
-	sort.Slice(eventData, func(i, j int) bool {
-		ti := eventData[i]["timestamp"].(string)
-		tj := eventData[j]["timestamp"].(string)
-		if ti != tj {
-			return ti < tj
-		}
-		return eventData[i]["event_id"].(string) < eventData[j]["event_id"].(string)
-	})
-
-	dataBytes, err := json.Marshal(eventData)
+	// Events are admitted in canonical (timestamp, event_id) order and stored
+	// with UTC timestamps. Encoding the event structs directly preserves exact
+	// accepted float64 values, including fixed fees, without decimal rounding.
+	dataBytes, err := json.Marshal(l.events)
 	if err != nil {
 		l.hashErr = fmt.Errorf("failed to marshal event data: %w", err)
 		return l.hashErr
@@ -275,9 +262,108 @@ func cloneMetadata(metadata map[string]interface{}) map[string]interface{} {
 	if metadata == nil {
 		return nil
 	}
-	clone := make(map[string]interface{}, len(metadata))
-	for key, value := range metadata {
-		clone[key] = value
+	cloned := cloneMetadataValue(reflect.ValueOf(metadata), make(map[cloneVisit]reflect.Value))
+	return cloned.Interface().(map[string]interface{})
+}
+
+type cloneVisit struct {
+	typeOf   reflect.Type
+	pointer  uintptr
+	length   int
+	capacity int
+}
+
+// cloneMetadataValue recursively clones reference-bearing JSON-compatible Go
+// values while preserving their concrete types. The visited table also keeps
+// shared references shared and prevents cycles from recursing indefinitely;
+// encoding/json will reject unsupported cyclic metadata when the hash is made.
+func cloneMetadataValue(value reflect.Value, visited map[cloneVisit]reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
 	}
-	return clone
+
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		clonedValue := cloneMetadataValue(value.Elem(), visited)
+		clonedInterface := reflect.New(value.Type()).Elem()
+		clonedInterface.Set(clonedValue)
+		return clonedInterface
+
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		visit := cloneVisit{typeOf: value.Type(), pointer: uintptr(value.UnsafePointer())}
+		if cloned, ok := visited[visit]; ok {
+			return cloned
+		}
+		clonedPointer := reflect.New(value.Type().Elem())
+		visited[visit] = clonedPointer
+		clonedPointer.Elem().Set(cloneMetadataValue(value.Elem(), visited))
+		return clonedPointer
+
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		visit := cloneVisit{typeOf: value.Type(), pointer: uintptr(value.UnsafePointer())}
+		if cloned, ok := visited[visit]; ok {
+			return cloned
+		}
+		clonedMap := reflect.MakeMapWithSize(value.Type(), value.Len())
+		visited[visit] = clonedMap
+		iterator := value.MapRange()
+		for iterator.Next() {
+			clonedKey := cloneMetadataValue(iterator.Key(), visited)
+			clonedValue := cloneMetadataValue(iterator.Value(), visited)
+			clonedMap.SetMapIndex(clonedKey, clonedValue)
+		}
+		return clonedMap
+
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		visit := cloneVisit{
+			typeOf:   value.Type(),
+			pointer:  uintptr(value.UnsafePointer()),
+			length:   value.Len(),
+			capacity: value.Cap(),
+		}
+		if cloned, ok := visited[visit]; ok {
+			return cloned
+		}
+		clonedSlice := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		visited[visit] = clonedSlice
+		for i := 0; i < value.Len(); i++ {
+			clonedSlice.Index(i).Set(cloneMetadataValue(value.Index(i), visited))
+		}
+		return clonedSlice
+
+	case reflect.Array:
+		clonedArray := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			clonedArray.Index(i).Set(cloneMetadataValue(value.Index(i), visited))
+		}
+		return clonedArray
+
+	case reflect.Struct:
+		// Start with a value copy so unexported scalar state is preserved, then
+		// replace exported reference-bearing fields with defensive clones.
+		clonedStruct := reflect.New(value.Type()).Elem()
+		clonedStruct.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if value.Type().Field(i).PkgPath != "" {
+				continue
+			}
+			clonedStruct.Field(i).Set(cloneMetadataValue(value.Field(i), visited))
+		}
+		return clonedStruct
+
+	default:
+		return value
+	}
 }

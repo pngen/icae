@@ -109,6 +109,9 @@ func (p *PricingModel) validateTiers() error {
 // For fixed-fee only models (no tiers), returns just the fixed fee.
 // Returns an error if quantity is negative or no tier covers the quantity.
 func (p *PricingModel) CalculateCost(quantity float64) (float64, error) {
+	if err := p.Validate(); err != nil {
+		return 0, fmt.Errorf("invalid pricing model: %w", err)
+	}
 	if quantity < 0 {
 		return 0, fmt.Errorf("quantity cannot be negative: got %.9f", quantity)
 	}

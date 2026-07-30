@@ -35,11 +35,11 @@ func (e *AdapterError) Unwrap() error {
 
 // ExecutionTranscript represents the input format for execution transcript data.
 type ExecutionTranscript struct {
-	ExecutionID string                   `json:"execution_id"`
-	StartTime   time.Time                `json:"start_time"`
-	EndTime     time.Time                `json:"end_time"`
-	Steps       []ExecutionStep          `json:"steps"`
-	Metadata    map[string]interface{}   `json:"metadata,omitempty"`
+	ExecutionID string                 `json:"execution_id"`
+	StartTime   time.Time              `json:"start_time"`
+	EndTime     time.Time              `json:"end_time"`
+	Steps       []ExecutionStep        `json:"steps"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ExecutionStep represents a single step in an execution transcript.
@@ -49,6 +49,7 @@ type ExecutionStep struct {
 	Component      string                 `json:"component"`
 	Action         string                 `json:"action"`
 	UnitCost       float64                `json:"unit_cost"`
+	FixedFee       float64                `json:"fixed_fee,omitempty"`
 	Quantity       float64                `json:"quantity"`
 	Currency       string                 `json:"currency"`
 	CostSource     string                 `json:"cost_source"`
@@ -117,8 +118,9 @@ func (a *ExecutionTranscriptAdapter) ToCostEvents(data interface{}) ([]models.Co
 			Component:      step.Component,
 			Action:         step.Action,
 			UnitCost:       step.UnitCost,
+			FixedFee:       step.FixedFee,
 			Quantity:       step.Quantity,
-			TotalCost:      step.UnitCost * step.Quantity,
+			TotalCost:      step.FixedFee + step.UnitCost*step.Quantity,
 			Currency:       currency,
 			CostSource:     step.CostSource,
 			PricingVersion: step.PricingVersion,
@@ -169,6 +171,7 @@ type ToolInvocation struct {
 	Timestamp      time.Time              `json:"timestamp"`
 	ToolName       string                 `json:"tool_name"`
 	UnitCost       float64                `json:"unit_cost"`
+	FixedFee       float64                `json:"fixed_fee,omitempty"`
 	Quantity       float64                `json:"quantity"`
 	CostSource     string                 `json:"cost_source"`
 	PricingVersion string                 `json:"pricing_version"`
@@ -213,8 +216,9 @@ func (a *ToolInvocationAdapter) ToCostEvents(data interface{}) ([]models.CostEve
 			Component:      "tool",
 			Action:         inv.ToolName,
 			UnitCost:       inv.UnitCost,
+			FixedFee:       inv.FixedFee,
 			Quantity:       inv.Quantity,
-			TotalCost:      inv.UnitCost * inv.Quantity,
+			TotalCost:      inv.FixedFee + inv.UnitCost*inv.Quantity,
 			Currency:       a.DefaultCurrency,
 			CostSource:     inv.CostSource,
 			PricingVersion: inv.PricingVersion,

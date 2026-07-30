@@ -15,6 +15,7 @@ type CostEvent struct {
 	Component      string                 `json:"component"`
 	Action         string                 `json:"action"`
 	UnitCost       float64                `json:"unit_cost"`
+	FixedFee       float64                `json:"fixed_fee,omitempty"`
 	Quantity       float64                `json:"quantity"`
 	TotalCost      float64                `json:"total_cost"`
 	Currency       string                 `json:"currency"`
@@ -64,6 +65,11 @@ func (e *CostEvent) Validate() error {
 	} else if e.UnitCost < 0 {
 		errs = append(errs, "unit_cost cannot be negative")
 	}
+	if !isFinite(e.FixedFee) {
+		errs = append(errs, "fixed_fee must be finite")
+	} else if e.FixedFee < 0 {
+		errs = append(errs, "fixed_fee cannot be negative")
+	}
 	if !isFinite(e.Quantity) {
 		errs = append(errs, "quantity must be finite")
 	} else if e.Quantity < 0 {
@@ -77,11 +83,11 @@ func (e *CostEvent) Validate() error {
 
 	// Cost consistency validation with epsilon for floating-point comparison
 	const epsilon = 1e-9
-	expectedCost := e.UnitCost * e.Quantity
-	if isFinite(e.UnitCost) && isFinite(e.Quantity) && isFinite(e.TotalCost) && math.Abs(e.TotalCost-expectedCost) > epsilon {
+	expectedCost := e.FixedFee + e.UnitCost*e.Quantity
+	if isFinite(e.FixedFee) && isFinite(e.UnitCost) && isFinite(e.Quantity) && isFinite(e.TotalCost) && math.Abs(e.TotalCost-expectedCost) > epsilon {
 		errs = append(errs, fmt.Sprintf(
-			"total_cost (%.9f) must equal unit_cost * quantity (%.9f * %.9f = %.9f)",
-			e.TotalCost, e.UnitCost, e.Quantity, expectedCost))
+			"total_cost (%.9f) must equal fixed_fee + unit_cost * quantity (%.9f + %.9f * %.9f = %.9f)",
+			e.TotalCost, e.FixedFee, e.UnitCost, e.Quantity, expectedCost))
 	}
 
 	if len(errs) > 0 {
