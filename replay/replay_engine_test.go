@@ -2,6 +2,7 @@ package replay
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -263,6 +264,49 @@ func TestCompareReplayWithOriginal_Mismatch(t *testing.T) {
 	}
 	if math.Abs(result.Delta-1.0) > replayEpsilon {
 		t.Fatalf("expected delta 1.0, got %v", result.Delta)
+	}
+}
+
+func TestCompareReplayWithOriginal_ConcurrentAppendUsesOneLedgerSnapshot(t *testing.T) {
+	engine := NewReplayEngine(createTestPricingModels())
+	l := ledger.NewCostLedger()
+	base := time.Now().UTC()
+
+	if err := l.AddEvent(createTestEvent("evt-0000", base, "exec-001")); err != nil {
+		t.Fatalf("failed to add event: %v", err)
+	}
+
+	const totalEvents = 300
+	appendResult := make(chan error, 1)
+	go func() {
+		for i := 1; i < totalEvents; i++ {
+			event := createTestEvent(fmt.Sprintf("evt-%04d", i), base.Add(time.Duration(i)*time.Millisecond), "exec-001")
+			if err := l.AddEvent(event); err != nil {
+				appendResult <- err
+				return
+			}
+		}
+		appendResult <- nil
+	}()
+
+	// The ledger and the engine price every event identically, so any single
+	// consistent view of the execution must compare as an exact match no matter
+	// how many events have been appended so far.
+	for appending := true; appending; {
+		select {
+		case err := <-appendResult:
+			if err != nil {
+				t.Fatalf("concurrent AddEvent failed: %v", err)
+			}
+			appending = false
+		default:
+		}
+
+		result := engine.CompareReplayWithOriginal("exec-001", l)
+		if result.Status != "match" || result.Delta != 0 {
+			t.Fatalf("comparison mixed two ledger views: status=%q events=%d original=%v replayed=%v delta=%v error=%q",
+				result.Status, result.EventCount, result.OriginalCost, result.ReplayedCost, result.Delta, result.Error)
+		}
 	}
 }
 

@@ -79,6 +79,12 @@ func (r *ReplayEngine) replayExecution(executionID string, l *ledger.CostLedger,
 		return 0, fmt.Errorf("%w: execution_id=%s", ErrNoEventsFound, executionID)
 	}
 
+	return r.replayEvents(events, verifyRecordedCost)
+}
+
+// replayEvents recomputes the cost of events that were already read from the
+// ledger, so a caller can price exactly the same events it summed.
+func (r *ReplayEngine) replayEvents(events []models.CostEvent, verifyRecordedCost bool) (float64, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -158,8 +164,10 @@ func (r *ReplayEngine) CompareReplayWithOriginal(executionID string, originalLed
 	}
 	result.OriginalCost = originalCost
 
-	// Try to replay using current pricing
-	replayedCost, err := r.replayExecution(executionID, originalLedger, false)
+	// Try to replay using current pricing. Replay the events already read above:
+	// reading the ledger again could include events appended in the meantime and
+	// report a delta between two different views of the execution.
+	replayedCost, err := r.replayEvents(originalEvents, false)
 	if err != nil {
 		result.Status = "error"
 		result.Error = err.Error()
